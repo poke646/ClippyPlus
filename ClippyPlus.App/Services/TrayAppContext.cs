@@ -37,6 +37,7 @@ public sealed class TrayAppContext : IDisposable
     private ClipboardHistoryWindow? _clipboardHistoryWindow;
     private CaptureOverlayWindow? _captureOverlayWindow;
     private bool _captureInProgress;
+    private Task<bool>? _pendingUnlockPromptTask;
 
     public TrayAppContext(
         IHotkeyService hotkeyService,
@@ -163,7 +164,8 @@ public sealed class TrayAppContext : IDisposable
             var cropped = _screenshotService.Crop(monitorImage, _captureOverlayWindow.Selection);
             _lastCaptureStore.Set(cropped);
             await _clipboardService.CopyImageAsync(cropped);
-            if (ClipboardHistoryEntryFactory.FromImageBytes(cropped.PngBytes) is { } entry)
+            if (ClipboardHistoryEntryFactory.FromImageBytes(cropped.PngBytes) is { } entry
+                && await EnsureClipboardUnlockedAsync())
             {
                 _clipboardHistoryStore.Upsert(entry);
             }
@@ -266,47 +268,61 @@ public sealed class TrayAppContext : IDisposable
         _clipboardHistoryWindow.Activate();
     }
 
-    private async Task<bool> EnsureClipboardUnlockedAsync()
+    private Task<bool> EnsureClipboardUnlockedAsync()
     {
         if (_clipboardSecurityService.IsUnlocked)
         {
-            return true;
+            return Task.FromResult(true);
         }
 
-        var owner = GetOwner();
-        if (!_clipboardSecurityService.IsPasswordConfigured)
+        // Share a single in-flight prompt so concurrent triggers (hotkeys, tray actions, etc.)
+        // don't stack multiple password windows on top of each other.
+        return _pendingUnlockPromptTask ??= PromptForClipboardUnlockAsync();
+    }
+
+    private async Task<bool> PromptForClipboardUnlockAsync()
+    {
+        try
         {
-            var newPassword = await PasswordWindow.ShowCreateAsync(owner);
-            if (newPassword is null)
+            var owner = GetOwner();
+            if (!_clipboardSecurityService.IsPasswordConfigured)
+            {
+                var newPassword = await PasswordWindow.ShowCreateAsync(owner);
+                if (newPassword is null)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    _clipboardSecurityService.SetPassword(newPassword);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    await MessageWindow.ShowAsync("ClippyPlus", ex.Message, owner);
+                    return false;
+                }
+            }
+
+            var password = await PasswordWindow.ShowUnlockAsync(owner);
+            if (password is null)
             {
                 return false;
             }
 
-            try
+            if (_clipboardSecurityService.TryUnlock(password))
             {
-                _clipboardSecurityService.SetPassword(newPassword);
                 return true;
             }
-            catch (Exception ex)
-            {
-                await MessageWindow.ShowAsync("ClippyPlus", ex.Message, owner);
-                return false;
-            }
-        }
 
-        var password = await PasswordWindow.ShowUnlockAsync(owner);
-        if (password is null)
-        {
+            await MessageWindow.ShowAsync("ClippyPlus", LocalizationService.T("Security.InvalidPassword"), owner);
             return false;
         }
-
-        if (_clipboardSecurityService.TryUnlock(password))
+        finally
         {
-            return true;
+            _pendingUnlockPromptTask = null;
         }
-
-        await MessageWindow.ShowAsync("ClippyPlus", LocalizationService.T("Security.InvalidPassword"), owner);
-        return false;
     }
 
     private void OpenSettingsWindow()
