@@ -19,6 +19,8 @@ public sealed class CaptureOverlayWindow : Window
     private readonly Rectangle _dimRight;
     private readonly Rectangle _dimBottom;
     private readonly Rectangle _selectionRectangle;
+    private readonly Border _dimensionLabel;
+    private readonly TextBlock _dimensionText;
     private UiPoint? _startPoint;
     private IPointer? _capturedPointer;
 
@@ -58,10 +60,28 @@ public sealed class CaptureOverlayWindow : Window
             IsVisible = false,
         };
 
+        _dimensionText = new TextBlock
+        {
+            Foreground = Brushes.White,
+            FontSize = 12,
+            FontWeight = FontWeight.SemiBold,
+        };
+        _dimensionLabel = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(220, 20, 20, 20)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(90, 90, 90)),
+            BorderThickness = new Avalonia.Thickness(1),
+            CornerRadius = new CornerRadius(4),
+            Padding = new Avalonia.Thickness(8, 4),
+            Child = _dimensionText,
+            IsHitTestVisible = false,
+            IsVisible = false,
+        };
+
         _surface = new Canvas
         {
             Background = Brushes.Transparent,
-            Children = { _dimTop, _dimLeft, _dimRight, _dimBottom, _selectionRectangle },
+            Children = { _dimTop, _dimLeft, _dimRight, _dimBottom, _selectionRectangle, _dimensionLabel },
             Focusable = true,
         };
         _surface.PointerPressed += OnPointerPressed;
@@ -158,6 +178,7 @@ public sealed class CaptureOverlayWindow : Window
         _capturedPointer?.Capture(null);
         _capturedPointer = null;
         _selectionRectangle.IsVisible = false;
+        _dimensionLabel.IsVisible = false;
         DrawDimming(null);
         Selection = ClippyPlus.App.Models.PixelRect.Empty;
         Close(false);
@@ -171,6 +192,42 @@ public sealed class CaptureOverlayWindow : Window
         Canvas.SetLeft(_selectionRectangle, rect.Left);
         Canvas.SetTop(_selectionRectangle, rect.Top);
         DrawDimming(rect);
+        DrawDimensionLabel(rect);
+    }
+
+    private void DrawDimensionLabel(UiRect rect)
+    {
+        var pixelRect = SelectionMath.ToPixelRect(
+            rect,
+            _surface.Bounds.Width,
+            _surface.Bounds.Height,
+            _monitor.Bounds.Width,
+            _monitor.Bounds.Height);
+        if (pixelRect.IsEmpty)
+        {
+            _dimensionLabel.IsVisible = false;
+            return;
+        }
+
+        _dimensionText.Text = $"{pixelRect.Width} × {pixelRect.Height} px";
+        _dimensionLabel.IsVisible = true;
+        _dimensionLabel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var labelWidth = _dimensionLabel.DesiredSize.Width;
+        var labelHeight = _dimensionLabel.DesiredSize.Height;
+        var surfaceWidth = Math.Max(0, _surface.Bounds.Width);
+        var surfaceHeight = Math.Max(0, _surface.Bounds.Height);
+        var displayRect = ClampToSurface(rect, surfaceWidth, surfaceHeight);
+        const double offset = 8;
+
+        var left = displayRect.Left + ((displayRect.Width - labelWidth) / 2);
+        left = Math.Clamp(left, 0, Math.Max(0, surfaceWidth - labelWidth));
+        var below = displayRect.Bottom + offset;
+        var top = below + labelHeight <= surfaceHeight
+            ? below
+            : displayRect.Top - labelHeight - offset;
+        top = Math.Clamp(top, 0, Math.Max(0, surfaceHeight - labelHeight));
+        Canvas.SetLeft(_dimensionLabel, left);
+        Canvas.SetTop(_dimensionLabel, top);
     }
 
     private static Bitmap CreateBitmap(CapturedImage image)

@@ -15,7 +15,7 @@ namespace ClippyPlus.App.Views;
 
 public sealed class ClipboardHistoryWindow : Window
 {
-    private const int MaxHistoryItems = 300;
+    private const int MaxHistoryItems = ClipboardHistoryStore.MaxHistoryItems;
     private const int HistoryPreviewDelayMs = 1000;
     private const int SearchActivationGuardMs = 300;
     private const double HistoryPreviewOffset = 14;
@@ -30,6 +30,7 @@ public sealed class ClipboardHistoryWindow : Window
     private readonly ListBox _historyListBox;
     private readonly TextBlock _emptyTextBlock;
     private readonly TextBox _searchTextBox;
+    private readonly StackPanel _tabsPanel;
     private readonly DispatcherTimer _searchDebounceTimer;
     private readonly DispatcherTimer _previewTimer;
     private readonly Canvas _previewCanvas;
@@ -38,6 +39,11 @@ public sealed class ClipboardHistoryWindow : Window
     private long? _visiblePreviewItemId;
     private Point _previewPointerPosition;
     private bool _hideSharingEnabled;
+    private bool _changingSearchText;
+    private long? _activeSectionId;
+    private IReadOnlyList<ClipboardSection> _sections = [];
+    private string _historyQuery = string.Empty;
+    private readonly Dictionary<long, string> _sectionQueries = [];
     private DateTime _ignoreSearchActivationUntil;
 
     public ClipboardHistoryWindow(
@@ -109,8 +115,27 @@ public sealed class ClipboardHistoryWindow : Window
         };
         _searchTextBox.TextChanged += (_, _) =>
         {
+            if (_changingSearchText)
+            {
+                return;
+            }
+
+            SetActiveQuery(_searchTextBox.Text ?? string.Empty);
             _searchDebounceTimer.Stop();
             _searchDebounceTimer.Start();
+        };
+
+        _tabsPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6,
+            Margin = new Avalonia.Thickness(8, 4),
+        };
+        var tabsScrollViewer = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Content = _tabsPanel,
         };
 
         var contentGrid = new Grid
@@ -138,15 +163,24 @@ public sealed class ClipboardHistoryWindow : Window
             BorderBrush = Brushes.DimGray,
             BorderThickness = new Avalonia.Thickness(1),
             Background = new SolidColorBrush(Color.FromRgb(32, 32, 32)),
-            Child = new DockPanel
+            Child = new Grid
             {
+                RowDefinitions =
+                {
+                    new RowDefinition(GridLength.Star),
+                    new RowDefinition(GridLength.Auto),
+                    new RowDefinition(GridLength.Auto),
+                },
                 Children =
                 {
-                    _searchTextBox,
                     contentGrid,
+                    tabsScrollViewer,
+                    _searchTextBox,
                 },
             },
         };
+        Grid.SetRow(tabsScrollViewer, 1);
+        Grid.SetRow(_searchTextBox, 2);
         Content = new Grid
         {
             Children =
@@ -155,18 +189,13 @@ public sealed class ClipboardHistoryWindow : Window
                 _previewCanvas,
             },
         };
-        DockPanel.SetDock(_searchTextBox, Dock.Bottom);
-
         Opened += (_, _) =>
         {
-            GuardSearchActivation();
+            ResetForOpen();
             CenterOnScreen();
             HidePreview();
-            _searchDebounceTimer.Stop();
-            _searchTextBox.Text = string.Empty;
-            RefreshItems();
             ApplyWindowDisplayAffinity();
-            _historyListBox.Focus();
+            FocusSearch();
         };
         Deactivated += (_, _) =>
         {
@@ -205,14 +234,57 @@ public sealed class ClipboardHistoryWindow : Window
         _ignoreSearchActivationUntil = DateTime.UtcNow.AddMilliseconds(SearchActivationGuardMs);
     }
 
+    public void ReloadSections()
+    {
+        _sections = _historyStore.GetSections();
+        if (_activeSectionId is { } activeId && _sections.All(section => section.Id != activeId))
+        {
+            _activeSectionId = null;
+            _changingSearchText = true;
+            _searchTextBox.Text = _historyQuery;
+            _changingSearchText = false;
+        }
+
+        RebuildTabs();
+        RefreshItems();
+    }
+
+    public void ResetForOpen()
+    {
+        GuardSearchActivation();
+        _searchDebounceTimer.Stop();
+        _historyQuery = string.Empty;
+        _sectionQueries.Clear();
+        _activeSectionId = null;
+        _changingSearchText = true;
+        _searchTextBox.Text = string.Empty;
+        _changingSearchText = false;
+        ReloadSections();
+        FocusSearch();
+    }
+
     private void RefreshItems()
     {
         HidePreview();
         var query = _searchTextBox.Text;
-        var items = string.IsNullOrWhiteSpace(query)
-            ? _historyStore.GetRecent(MaxHistoryItems)
-            : _historyStore.SearchText(query, MaxHistoryItems);
+        IReadOnlyList<ClipboardHistoryItem> items;
+        if (_activeSectionId is { } sectionId)
+        {
+            items = string.IsNullOrWhiteSpace(query)
+                ? _historyStore.GetSectionItems(sectionId, MaxHistoryItems)
+                : _historyStore.SearchSectionText(sectionId, query, MaxHistoryItems);
+        }
+        else
+        {
+            items = string.IsNullOrWhiteSpace(query)
+                ? _historyStore.GetRecent(MaxHistoryItems)
+                : _historyStore.SearchText(query, MaxHistoryItems);
+        }
+
         _historyListBox.ItemsSource = items;
+        _emptyTextBlock.Text = _activeSectionId is null
+            ? LocalizationService.T("History.Empty")
+            : LocalizationService.T("History.SectionEmpty");
         _emptyTextBlock.IsVisible = items.Count == 0;
         _historyListBox.IsVisible = items.Count > 0;
         if (items.Count > 0)
@@ -222,13 +294,115 @@ public sealed class ClipboardHistoryWindow : Window
         }
     }
 
+    private void RebuildTabs()
+    {
+        _tabsPanel.Children.Clear();
+        _tabsPanel.Children.Add(CreateTabButton(LocalizationService.T("History.TabHistory"), null));
+        foreach (var section in _sections)
+        {
+            _tabsPanel.Children.Add(CreateTabButton(section.Name, section.Id));
+        }
+    }
+
+    private Button CreateTabButton(string label, long? sectionId)
+    {
+        var isActive = _activeSectionId == sectionId;
+        var button = new Button
+        {
+            Content = label,
+            FontWeight = isActive ? FontWeight.Bold : FontWeight.Normal,
+            Background = isActive
+                ? new SolidColorBrush(Color.FromRgb(60, 60, 60))
+                : Brushes.Transparent,
+            Padding = new Avalonia.Thickness(12, 5),
+        };
+        button.Click += (_, _) => ActivateSection(sectionId);
+        return button;
+    }
+
+    private void ActivateSection(long? sectionId)
+    {
+        if (_activeSectionId == sectionId)
+        {
+            FocusSearch();
+            return;
+        }
+
+        SetActiveQuery(_searchTextBox.Text ?? string.Empty);
+        _activeSectionId = sectionId;
+        var query = sectionId is { } id && _sectionQueries.TryGetValue(id, out var sectionQuery)
+            ? sectionQuery
+            : sectionId is null ? _historyQuery : string.Empty;
+        _changingSearchText = true;
+        _searchTextBox.Text = query;
+        _changingSearchText = false;
+        RebuildTabs();
+        RefreshItems();
+        FocusSearch();
+    }
+
+    private void MoveToAdjacentSection(int delta)
+    {
+        var tabIds = new long?[] { null }
+            .Concat(_sections.Select(section => (long?)section.Id))
+            .ToList();
+        var currentIndex = tabIds.FindIndex(sectionId => sectionId == _activeSectionId);
+        var nextIndex = (currentIndex + delta + tabIds.Count) % tabIds.Count;
+        var query = _searchTextBox.Text ?? string.Empty;
+
+        SetActiveQuery(query);
+        _activeSectionId = tabIds[nextIndex];
+        SetActiveQuery(query);
+        RebuildTabs();
+        RefreshItems();
+        FocusSearch();
+    }
+
+    private void SetActiveQuery(string query)
+    {
+        if (_activeSectionId is { } sectionId)
+        {
+            _sectionQueries[sectionId] = query;
+        }
+        else
+        {
+            _historyQuery = query;
+        }
+    }
+
+    private void FocusSearch()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            _searchTextBox.Focus();
+            _searchTextBox.CaretIndex = _searchTextBox.Text?.Length ?? 0;
+        });
+    }
+
     private async void OnWindowKeyDownTunnel(object? sender, KeyEventArgs e)
     {
+        if (e.Key == Key.Tab)
+        {
+            MoveToAdjacentSection(e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? -1 : 1);
+            e.Handled = true;
+            return;
+        }
+
         if (e.Source is TextBox)
         {
             if (IsConfirmKey(e.Key))
             {
                 await CopySelectedItemAndCloseAsync();
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Down)
+            {
+                MoveSelection(1);
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Up)
+            {
+                MoveSelection(-1);
                 e.Handled = true;
             }
 
@@ -294,14 +468,59 @@ public sealed class ClipboardHistoryWindow : Window
             return;
         }
 
-        _historyStore.Delete(item.Id);
-        RefreshItems();
+        if (_activeSectionId is null)
+        {
+            _historyStore.Delete(item.Id);
+            RefreshItems();
+        }
+        else
+        {
+            _historyStore.DeletePinned(item.Id);
+            ReloadSections();
+        }
     }
 
     private void DeleteAll()
     {
         _historyStore.DeleteAll();
         RefreshItems();
+    }
+
+    private void UnpinSelected()
+    {
+        if (_activeSectionId is null || _historyListBox.SelectedItem is not ClipboardHistoryItem item)
+        {
+            return;
+        }
+
+        _historyStore.Unpin(item.Id);
+        ReloadSections();
+    }
+
+    private async Task PinSelectedAsync(long sectionId)
+    {
+        if (_activeSectionId is not null || _historyListBox.SelectedItem is not ClipboardHistoryItem item)
+        {
+            return;
+        }
+
+        var result = _historyStore.Pin(item.Id, sectionId);
+        if (result == PinClipboardItemResult.SectionFull)
+        {
+            await MessageWindow.ShowAsync(
+                "ClippyPlus",
+                LocalizationService.T("History.SectionFull"),
+                this);
+        }
+        else if (result != PinClipboardItemResult.Success)
+        {
+            await MessageWindow.ShowAsync(
+                "ClippyPlus",
+                LocalizationService.T("History.PinFailed"),
+                this);
+        }
+
+        ReloadSections();
     }
 
     private async Task CopySelectedItemAndCloseAsync()
@@ -336,15 +555,43 @@ public sealed class ClipboardHistoryWindow : Window
     {
         var editImageItem = new MenuItem { Header = LocalizationService.T("History.Edit") };
         editImageItem.Click += (_, _) => OpenSelectedImageEditor();
+        var pinItem = new MenuItem { Header = LocalizationService.T("History.Pin") };
+        var unpinItem = new MenuItem { Header = LocalizationService.T("History.Unpin") };
+        unpinItem.Click += (_, _) => UnpinSelected();
         var deleteItem = new MenuItem { Header = LocalizationService.T("History.Delete") };
         deleteItem.Click += (_, _) => DeleteSelected();
         var deleteAllItem = new MenuItem { Header = LocalizationService.T("History.DeleteAll") };
         deleteAllItem.Click += (_, _) => DeleteAll();
         var menu = new ContextMenu
         {
-            ItemsSource = new[] { editImageItem, deleteItem, deleteAllItem },
+            ItemsSource = new[] { editImageItem, pinItem, unpinItem, deleteItem, deleteAllItem },
         };
-        menu.Opening += (_, _) => editImageItem.IsVisible = IsSelectedImage();
+        menu.Opening += (_, _) =>
+        {
+            editImageItem.IsVisible = IsSelectedImage();
+            var isHistory = _activeSectionId is null;
+            pinItem.IsVisible = isHistory;
+            unpinItem.IsVisible = !isHistory;
+            deleteAllItem.IsVisible = isHistory;
+
+            if (_sections.Count == 0)
+            {
+                pinItem.Header = LocalizationService.T("History.ConfigureSections");
+                pinItem.ItemsSource = null;
+                pinItem.IsEnabled = false;
+            }
+            else
+            {
+                pinItem.Header = LocalizationService.T("History.Pin");
+                pinItem.IsEnabled = true;
+                pinItem.ItemsSource = _sections.Select(section =>
+                {
+                    var target = new MenuItem { Header = section.Name };
+                    target.Click += async (_, _) => await PinSelectedAsync(section.Id);
+                    return target;
+                }).ToArray();
+            }
+        };
         return menu;
     }
 

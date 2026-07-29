@@ -246,7 +246,7 @@ public sealed class TrayAppContext : IDisposable
         if (_clipboardHistoryWindow is not null)
         {
             _clipboardHistoryWindow.SetHideSharingEnabled(_settings.HideSharingEnabled);
-            _clipboardHistoryWindow.GuardSearchActivation();
+            _clipboardHistoryWindow.ResetForOpen();
             _clipboardHistoryWindow.Show();
             _clipboardHistoryWindow.CenterOnScreen();
             _clipboardHistoryWindow.Activate();
@@ -260,7 +260,6 @@ public sealed class TrayAppContext : IDisposable
             _settings.HideSharingEnabled,
             _windowPrivacyService);
         _clipboardHistoryWindow.Closed += (_, _) => _clipboardHistoryWindow = null;
-        _clipboardHistoryWindow.GuardSearchActivation();
         _clipboardHistoryWindow.Show(GetOwner());
         _clipboardHistoryWindow.CenterOnScreen();
         _clipboardHistoryWindow.Activate();
@@ -311,7 +310,7 @@ public sealed class TrayAppContext : IDisposable
 
     private void OpenSettingsWindow()
     {
-        var window = new SettingsWindow(_settings);
+        var window = new SettingsWindow(_settings, _clipboardHistoryStore);
         window.Saved += (_, settings) =>
         {
             _settings = settings;
@@ -320,6 +319,7 @@ public sealed class TrayAppContext : IDisposable
             UpdateMenuText();
             _hideSharingMenuItem.IsChecked = _settings.HideSharingEnabled;
             _clipboardHistoryWindow?.SetHideSharingEnabled(_settings.HideSharingEnabled);
+            _clipboardHistoryWindow?.ReloadSections();
             RegisterHotkeys();
         };
         window.Show(GetOwner());

@@ -176,6 +176,168 @@ public sealed class ClipboardHistoryTests : IDisposable
     }
 
     [Fact]
+    public void Initialize_CreatesDefaultSectionOnlyOnce()
+    {
+        var databasePath = CreateDatabasePath();
+        var security = new ClipboardSecurityService(databasePath);
+        security.SetPassword("correct horse battery staple");
+        var store = new ClipboardHistoryStore(databasePath, security);
+
+        var section = Assert.Single(store.GetSections());
+        Assert.Equal("Pinned", section.Name);
+        Assert.Equal(100, section.ItemLimit);
+
+        store.ApplySections([]);
+        var reopened = new ClipboardHistoryStore(databasePath, security);
+
+        Assert.Empty(reopened.GetSections());
+    }
+
+    [Fact]
+    public void ApplySections_AddsRenamesAndValidatesSections()
+    {
+        var (store, _) = CreateStore();
+        var pinned = Assert.Single(store.GetSections());
+
+        store.ApplySections(
+        [
+            new ClipboardSectionDraft(pinned.Id, "Work", 25),
+            new ClipboardSectionDraft(null, "Personal", 10),
+        ]);
+
+        var sections = store.GetSections();
+        Assert.Equal(["Work", "Personal"], sections.Select(section => section.Name));
+        Assert.Equal([25, 10], sections.Select(section => section.ItemLimit));
+        Assert.Throws<InvalidOperationException>(() => store.ApplySections(
+        [
+            new ClipboardSectionDraft(sections[0].Id, "Same", 10),
+            new ClipboardSectionDraft(sections[1].Id, "same", 10),
+        ]));
+        Assert.Throws<InvalidOperationException>(() => store.ApplySections(
+            Enumerable.Range(1, 11)
+                .Select(index => new ClipboardSectionDraft(null, $"Section {index}", 10))
+                .ToList()));
+    }
+
+    [Fact]
+    public void PinAndUnpin_MoveItemBetweenIndependentLists()
+    {
+        var (store, _) = CreateStore();
+        var section = Assert.Single(store.GetSections());
+        store.Upsert(ClipboardHistoryEntryFactory.FromText("move me")!);
+        var historyItem = Assert.Single(store.GetRecent(100));
+
+        var result = store.Pin(historyItem.Id, section.Id);
+
+        Assert.Equal(PinClipboardItemResult.Success, result);
+        Assert.Empty(store.GetRecent(100));
+        var pinnedItem = Assert.Single(store.GetSectionItems(section.Id, 100));
+        Assert.Equal("move me", pinnedItem.TextContent);
+
+        Assert.True(store.Unpin(pinnedItem.Id));
+        Assert.Empty(store.GetSectionItems(section.Id, 100));
+        Assert.Equal("move me", Assert.Single(store.GetRecent(100)).TextContent);
+    }
+
+    [Fact]
+    public void Pin_RefusesFullSectionWithoutRemovingHistoryItem()
+    {
+        var (store, _) = CreateStore();
+        var original = Assert.Single(store.GetSections());
+        store.ApplySections([new ClipboardSectionDraft(original.Id, original.Name, 1)]);
+        store.Upsert(ClipboardHistoryEntryFactory.FromText("first")!);
+        var first = Assert.Single(store.GetRecent(100));
+        Assert.Equal(PinClipboardItemResult.Success, store.Pin(first.Id, original.Id));
+        store.Upsert(ClipboardHistoryEntryFactory.FromText("second")!);
+        var second = Assert.Single(store.GetRecent(100));
+
+        var result = store.Pin(second.Id, original.Id);
+
+        Assert.Equal(PinClipboardItemResult.SectionFull, result);
+        Assert.Equal("second", Assert.Single(store.GetRecent(100)).TextContent);
+        Assert.Equal("first", Assert.Single(store.GetSectionItems(original.Id, 100)).TextContent);
+    }
+
+    [Fact]
+    public void Upsert_DoesNotDuplicateContentAlreadyPinned()
+    {
+        var (store, _) = CreateStore();
+        var section = Assert.Single(store.GetSections());
+        var entry = ClipboardHistoryEntryFactory.FromText("stay pinned")!;
+        store.Upsert(entry);
+        store.Pin(Assert.Single(store.GetRecent(100)).Id, section.Id);
+
+        store.Upsert(entry);
+
+        Assert.Empty(store.GetRecent(100));
+        Assert.Single(store.GetSectionItems(section.Id, 100));
+    }
+
+    [Fact]
+    public void SearchAndDeletePinned_AreScopedToSelectedSection()
+    {
+        var (store, _) = CreateStore();
+        var firstSection = Assert.Single(store.GetSections());
+        store.ApplySections(
+        [
+            new ClipboardSectionDraft(firstSection.Id, "First", 10),
+            new ClipboardSectionDraft(null, "Second", 10),
+        ]);
+        var sections = store.GetSections();
+        store.Upsert(ClipboardHistoryEntryFactory.FromText("alpha pinned")!);
+        store.Pin(Assert.Single(store.GetRecent(100)).Id, sections[0].Id);
+        store.Upsert(ClipboardHistoryEntryFactory.FromText("beta pinned")!);
+        store.Pin(Assert.Single(store.GetRecent(100)).Id, sections[1].Id);
+
+        var result = Assert.Single(store.SearchSectionText(sections[0].Id, "ALPHA", 100));
+        Assert.Empty(store.SearchSectionText(sections[1].Id, "ALPHA", 100));
+
+        store.DeletePinned(result.Id);
+
+        Assert.Empty(store.GetSectionItems(sections[0].Id, 100));
+        Assert.Empty(store.GetRecent(100));
+        Assert.Equal("beta pinned", Assert.Single(store.GetSectionItems(sections[1].Id, 100)).TextContent);
+    }
+
+    [Fact]
+    public void ApplySections_RejectsLimitBelowCurrentItemCount()
+    {
+        var (store, _) = CreateStore();
+        var section = Assert.Single(store.GetSections());
+        store.ApplySections([new ClipboardSectionDraft(section.Id, section.Name, 2)]);
+        store.Upsert(ClipboardHistoryEntryFactory.FromText("first")!);
+        store.Pin(Assert.Single(store.GetRecent(100)).Id, section.Id);
+        store.Upsert(ClipboardHistoryEntryFactory.FromText("second")!);
+        store.Pin(Assert.Single(store.GetRecent(100)).Id, section.Id);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            store.ApplySections([new ClipboardSectionDraft(section.Id, section.Name, 1)]));
+        Assert.Equal(2, store.GetSectionItems(section.Id, 100).Count);
+    }
+
+    [Fact]
+    public void DeleteSection_CascadesEncryptedPinnedItems()
+    {
+        var databasePath = CreateDatabasePath();
+        var security = new ClipboardSecurityService(databasePath);
+        security.SetPassword("correct horse battery staple");
+        var store = new ClipboardHistoryStore(databasePath, security);
+        var section = Assert.Single(store.GetSections());
+        store.Upsert(ClipboardHistoryEntryFactory.FromText("secret pinned value")!);
+        store.Pin(Assert.Single(store.GetRecent(100)).Id, section.Id);
+
+        var databaseBytes = File.ReadAllBytes(databasePath);
+        Assert.DoesNotContain(
+            "secret pinned value",
+            System.Text.Encoding.UTF8.GetString(databaseBytes));
+
+        store.ApplySections([]);
+
+        Assert.Empty(store.GetSections());
+        Assert.Empty(store.GetSectionItems(section.Id, 100));
+    }
+
+    [Fact]
     public void TryUnlock_RejectsWrongPassword()
     {
         var databasePath = CreateDatabasePath();
