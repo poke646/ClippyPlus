@@ -388,7 +388,7 @@ public sealed class ClipboardHistoryWindow : Window
             return;
         }
 
-        if (e.Source is TextBox)
+        if (e.Source is TextBox || FindParent<TextBox>(e.Source as Control) is not null)
         {
             if (IsConfirmKey(e.Key))
             {
@@ -546,6 +546,18 @@ public sealed class ClipboardHistoryWindow : Window
         Hide();
     }
 
+    private void OpenSelectedContent()
+    {
+        if (_historyListBox.SelectedItem is not ClipboardHistoryItem { TextContent: { } text }
+            || !ExternalContentService.TryOpen(text))
+        {
+            return;
+        }
+
+        HidePreview();
+        Hide();
+    }
+
     private void ApplyWindowDisplayAffinity()
     {
         _windowPrivacyService.SetExcludedFromCapture(this, _hideSharingEnabled);
@@ -553,6 +565,8 @@ public sealed class ClipboardHistoryWindow : Window
 
     private ContextMenu CreateContextMenu()
     {
+        var openItem = new MenuItem { Header = LocalizationService.T("History.Open") };
+        openItem.Click += (_, _) => OpenSelectedContent();
         var editImageItem = new MenuItem { Header = LocalizationService.T("History.Edit") };
         editImageItem.Click += (_, _) => OpenSelectedImageEditor();
         var pinItem = new MenuItem { Header = LocalizationService.T("History.Pin") };
@@ -564,10 +578,11 @@ public sealed class ClipboardHistoryWindow : Window
         deleteAllItem.Click += (_, _) => DeleteAll();
         var menu = new ContextMenu
         {
-            ItemsSource = new[] { editImageItem, pinItem, unpinItem, deleteItem, deleteAllItem },
+            ItemsSource = new[] { openItem, editImageItem, pinItem, unpinItem, deleteItem, deleteAllItem },
         };
         menu.Opening += (_, _) =>
         {
+            openItem.IsVisible = CanOpenSelectedContent();
             editImageItem.IsVisible = IsSelectedImage();
             var isHistory = _activeSectionId is null;
             pinItem.IsVisible = isHistory;
@@ -615,14 +630,21 @@ public sealed class ClipboardHistoryWindow : Window
         editor.Activate();
     }
 
+    private bool CanOpenSelectedContent()
+    {
+        return _historyListBox.SelectedItem is ClipboardHistoryItem { TextContent: { } text }
+            && ExternalContentService.CanOpen(text);
+    }
+
     private void OnHistoryListBoxPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (!e.GetCurrentPoint(_historyListBox).Properties.IsRightButtonPressed)
+        var point = e.GetCurrentPoint(_historyListBox);
+        if (FindParent<ListBoxItem>(e.Source as Control) is not { } item)
         {
             return;
         }
 
-        if (FindParent<ListBoxItem>(e.Source as Control) is { } item)
+        if (point.Properties.IsRightButtonPressed)
         {
             item.IsSelected = true;
             item.Focus();
