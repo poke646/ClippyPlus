@@ -33,9 +33,19 @@ public sealed class ClipboardSecurityService : IClipboardSecurityService
         Directory.CreateDirectory(Path.GetDirectoryName(_databasePath)!);
         Initialize();
         _metadata = LoadMetadata();
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT AutomaticKeys FROM ClipboardSecurityAccess WHERE Id = 1";
+        if (command.ExecuteScalar() is byte[] automaticKeys)
+        {
+            SetActiveKeys(automaticKeys);
+            IsPasswordEnabled = false;
+        }
     }
 
     public bool IsPasswordConfigured => _metadata is not null;
+
+    public bool IsPasswordEnabled { get; private set; } = true;
 
     public bool IsUnlocked => _encryptionKey is not null && _hashKey is not null;
 
@@ -43,6 +53,10 @@ public sealed class ClipboardSecurityService : IClipboardSecurityService
 
     public void SetPassword(string password)
     {
+        if (IsPasswordConfigured)
+        {
+            throw new InvalidOperationException("A password is already configured.");
+        }
         ValidatePassword(password);
         var salt = RandomNumberGenerator.GetBytes(SaltSize);
         var derived = DeriveKeys(password, salt, Pbkdf2Iterations);
@@ -66,8 +80,72 @@ public sealed class ClipboardSecurityService : IClipboardSecurityService
             return false;
         }
 
-        SetActiveKeys(derived);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT WrappedKeys FROM ClipboardSecurityAccess WHERE Id = 1";
+        var keys = command.ExecuteScalar() is byte[] wrapped
+            ? Decrypt(wrapped, derived[..32])
+            : derived[..64];
+        CryptographicOperations.ZeroMemory(derived);
+        SetActiveKeys(keys);
         return true;
+    }
+
+    public bool SetPasswordProtection(string currentPassword, string? newPassword)
+    {
+        if (newPassword is not null)
+        {
+            ValidatePassword(newPassword);
+        }
+        if (!TryUnlock(currentPassword))
+        {
+            return false;
+        }
+
+        var keys = RequireKey(_encryptionKey).Concat(RequireKey(_hashKey)).ToArray();
+        byte[]? derived = null;
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction();
+            SecurityMetadata? updatedMetadata = null;
+            byte[]? wrapped = null;
+            if (newPassword is not null)
+            {
+                var salt = RandomNumberGenerator.GetBytes(SaltSize);
+                derived = DeriveKeys(newPassword, salt, Pbkdf2Iterations);
+                updatedMetadata = new SecurityMetadata(salt, Pbkdf2Iterations, ComputeVerifier(derived));
+                wrapped = Encrypt(keys, derived[..32]);
+                using var metadataCommand = connection.CreateCommand();
+                metadataCommand.Transaction = transaction;
+                metadataCommand.CommandText = "UPDATE ClipboardSecurityMetadata SET Salt=$salt, Iterations=$iterations, Verifier=$verifier WHERE Key=$key";
+                metadataCommand.Parameters.AddWithValue("$salt", salt);
+                metadataCommand.Parameters.AddWithValue("$iterations", Pbkdf2Iterations);
+                metadataCommand.Parameters.AddWithValue("$verifier", updatedMetadata.Verifier);
+                metadataCommand.Parameters.AddWithValue("$key", MetadataKey);
+                metadataCommand.ExecuteNonQuery();
+            }
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            // Preserve the existing password wrapper when disabling protection.
+            command.CommandText = newPassword is null
+                ? "INSERT INTO ClipboardSecurityAccess (Id, AutomaticKeys) VALUES (1, $automatic) ON CONFLICT(Id) DO UPDATE SET AutomaticKeys=$automatic"
+                : "INSERT INTO ClipboardSecurityAccess (Id, WrappedKeys, AutomaticKeys) VALUES (1, $wrapped, NULL) ON CONFLICT(Id) DO UPDATE SET WrappedKeys=$wrapped, AutomaticKeys=NULL";
+            if (newPassword is null)
+                command.Parameters.AddWithValue("$automatic", keys);
+            else
+                command.Parameters.AddWithValue("$wrapped", wrapped!);
+            command.ExecuteNonQuery();
+            transaction.Commit();
+            if (updatedMetadata is not null) _metadata = updatedMetadata;
+            IsPasswordEnabled = newPassword is not null;
+            return true;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keys);
+            if (derived is not null) CryptographicOperations.ZeroMemory(derived);
+        }
     }
 
     public string ProtectString(string value)
@@ -82,7 +160,11 @@ public sealed class ClipboardSecurityService : IClipboardSecurityService
 
     public byte[] ProtectBytes(byte[] value)
     {
-        var key = RequireKey(_encryptionKey);
+        return Encrypt(value, RequireKey(_encryptionKey));
+    }
+
+    private static byte[] Encrypt(byte[] value, byte[] key)
+    {
         var nonce = RandomNumberGenerator.GetBytes(NonceSize);
         var ciphertext = new byte[value.Length];
         var tag = new byte[TagSize];
@@ -98,7 +180,11 @@ public sealed class ClipboardSecurityService : IClipboardSecurityService
 
     public byte[] UnprotectBytes(byte[] protectedValue)
     {
-        var key = RequireKey(_encryptionKey);
+        return Decrypt(protectedValue, RequireKey(_encryptionKey));
+    }
+
+    private static byte[] Decrypt(byte[] protectedValue, byte[] key)
+    {
         if (protectedValue.Length < NonceSize + TagSize)
         {
             throw new CryptographicException("Protected clipboard value is invalid.");
@@ -125,6 +211,11 @@ public sealed class ClipboardSecurityService : IClipboardSecurityService
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
+            CREATE TABLE IF NOT EXISTS ClipboardSecurityAccess (
+                Id INTEGER PRIMARY KEY CHECK (Id = 1),
+                WrappedKeys BLOB,
+                AutomaticKeys BLOB
+            );
             CREATE TABLE IF NOT EXISTS ClipboardSecurityMetadata (
                 Key TEXT PRIMARY KEY,
                 Salt BLOB NOT NULL,
@@ -181,11 +272,16 @@ public sealed class ClipboardSecurityService : IClipboardSecurityService
     {
         var connection = new SqliteConnection($"Data Source={_databasePath};Pooling=False");
         connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA secure_delete = ON";
+        command.ExecuteNonQuery();
         return connection;
     }
 
     private void SetActiveKeys(byte[] derived)
     {
+        if (_encryptionKey is not null) CryptographicOperations.ZeroMemory(_encryptionKey);
+        if (_hashKey is not null) CryptographicOperations.ZeroMemory(_hashKey);
         _encryptionKey = derived[..32].ToArray();
         _hashKey = derived[32..64].ToArray();
         CryptographicOperations.ZeroMemory(derived);

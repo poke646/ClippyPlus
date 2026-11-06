@@ -4,6 +4,10 @@ public interface IClipboardSecurityService
 {
     bool IsPasswordConfigured { get; }
 
+    bool IsPasswordEnabled { get; }
+
+    bool SetPasswordProtection(string currentPassword, string? newPassword);
+
     bool IsUnlocked { get; }
 
     event EventHandler? Unlocked;

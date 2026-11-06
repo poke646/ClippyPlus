@@ -121,6 +121,7 @@ public sealed class TrayAppContext : IDisposable
         _trayIcon.IsVisible = true;
         _clipboardSecurityService.Unlocked += (_, _) => _clipboardHistoryListener.Start();
         RegisterHotkeys();
+        if (_clipboardSecurityService.IsUnlocked) _clipboardHistoryListener.Start();
         if (!_clipboardSecurityService.IsPasswordConfigured)
         {
             await EnsureClipboardUnlockedAsync();
@@ -139,6 +140,11 @@ public sealed class TrayAppContext : IDisposable
 
     private async Task BeginCaptureAsync(bool openEditorAfterCapture = false)
     {
+        if (_pendingUnlockPromptTask is not null)
+        {
+            PasswordWindow.ActivateCurrent();
+            return;
+        }
         if (_captureInProgress)
         {
             return;
@@ -276,6 +282,7 @@ public sealed class TrayAppContext : IDisposable
 
         // Share a single in-flight prompt so concurrent triggers (hotkeys, tray actions, etc.)
         // don't stack multiple password windows on top of each other.
+        if (_pendingUnlockPromptTask is not null) PasswordWindow.ActivateCurrent();
         return _pendingUnlockPromptTask ??= PromptForClipboardUnlockAsync();
     }
 
@@ -326,7 +333,7 @@ public sealed class TrayAppContext : IDisposable
 
     private void OpenSettingsWindow()
     {
-        var window = new SettingsWindow(_settings, _clipboardHistoryStore);
+        var window = new SettingsWindow(_settings, _clipboardHistoryStore, _clipboardSecurityService);
         window.Saved += (_, settings) =>
         {
             _settings = settings;

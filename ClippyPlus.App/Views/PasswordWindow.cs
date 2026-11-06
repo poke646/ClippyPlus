@@ -8,19 +8,21 @@ namespace ClippyPlus.App.Views;
 
 public sealed class PasswordWindow : Window
 {
+    private static PasswordWindow? _activeWindow;
     private readonly TextBox _passwordTextBox;
     private readonly TextBox? _confirmPasswordTextBox;
     private readonly TextBlock _errorTextBlock;
     private readonly bool _isCreatingPassword;
 
-    private PasswordWindow(bool isCreatingPassword)
+    private PasswordWindow(bool isCreatingPassword, bool verifyCurrent = false)
     {
         _isCreatingPassword = isCreatingPassword;
         Title = LocalizationService.T(isCreatingPassword ? "Security.CreateTitle" : "Security.UnlockTitle");
         Width = 360;
         SizeToContent = SizeToContent.Height;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        ShowInTaskbar = false;
+        ShowInTaskbar = true;
+        Topmost = true;
         Icon = AppIcon.CreateWindowIcon();
 
         _passwordTextBox = new TextBox
@@ -65,7 +67,7 @@ public sealed class PasswordWindow : Window
             {
                 new TextBlock
                 {
-                    Text = LocalizationService.T(isCreatingPassword ? "Security.CreateMessage" : "Security.UnlockMessage"),
+                    Text = LocalizationService.T(verifyCurrent ? "Security.CurrentPasswordMessage" : isCreatingPassword ? "Security.CreateMessage" : "Security.UnlockMessage"),
                     TextWrapping = TextWrapping.Wrap,
                 },
                 _passwordTextBox,
@@ -109,7 +111,31 @@ public sealed class PasswordWindow : Window
                 e.Handled = true;
             }
         };
-        Opened += (_, _) => _passwordTextBox.Focus();
+        Opened += (_, _) =>
+        {
+            _activeWindow = this;
+            BringToFront();
+        };
+        Closed += (_, _) =>
+        {
+            if (_activeWindow == this) _activeWindow = null;
+        };
+    }
+
+    public static void ActivateCurrent() => _activeWindow?.BringToFront();
+
+    private void BringToFront()
+    {
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Topmost = false;
+        Topmost = true;
+        Activate();
+        _passwordTextBox.Focus();
+    }
+
+    public static Task<string?> ShowCurrentAsync(Window owner)
+    {
+        return new PasswordWindow(false, verifyCurrent: true).ShowDialog<string?>(owner);
     }
 
     public static Task<string?> ShowCreateAsync(Window owner)

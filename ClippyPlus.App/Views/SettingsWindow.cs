@@ -20,11 +20,20 @@ public sealed class SettingsWindow : Window
     private readonly List<SectionEditorItem> _sections;
     private readonly IReadOnlyList<ClipboardSection> _originalSections;
     private readonly Button _addSectionButton;
+    private readonly IClipboardSecurityService _securityService;
+    private readonly Button _passwordProtectionButton;
     private CaptureTarget? _captureTarget;
 
-    public SettingsWindow(AppSettings settings, IClipboardHistoryStore historyStore)
+    public SettingsWindow(AppSettings settings, IClipboardHistoryStore historyStore, IClipboardSecurityService securityService)
     {
         _historyStore = historyStore;
+        _securityService = securityService;
+        _passwordProtectionButton = new Button
+        {
+            Content = LocalizationService.T(securityService.IsPasswordConfigured && securityService.IsPasswordEnabled ? "Security.DisablePassword" : "Security.EnablePassword"),
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        _passwordProtectionButton.Click += async (_, _) => await TogglePasswordProtectionAsync();
         _originalSections = historyStore.GetSections();
         _sections = _originalSections
             .Select(section => new SectionEditorItem(section.Id, section.Name, section.ItemLimit, section.ItemCount))
@@ -108,6 +117,7 @@ public sealed class SettingsWindow : Window
                 CreateHotkeyRow(LocalizationService.T("Settings.EditScreenCapture"), _editCaptureHotkeyTextBox, recordEditCaptureButton),
                 CreateHotkeyRow(LocalizationService.T("Settings.ClipboardHistory"), _clipboardHistoryHotkeyTextBox, recordHistoryButton),
                 _hideSharingCheckBox,
+                _passwordProtectionButton,
                 new TextBlock
                 {
                     Text = LocalizationService.T("Settings.PinnedSections"),
@@ -138,6 +148,49 @@ public sealed class SettingsWindow : Window
         };
 
         KeyDown += OnKeyDown;
+    }
+
+    private async Task TogglePasswordProtectionAsync()
+    {
+        _passwordProtectionButton.IsEnabled = false;
+        try
+        {
+            if (!_securityService.IsPasswordConfigured)
+            {
+                var firstPassword = await PasswordWindow.ShowCreateAsync(this);
+                if (firstPassword is null) return;
+                _securityService.SetPassword(firstPassword);
+            }
+            else
+            {
+                var currentPassword = await PasswordWindow.ShowCurrentAsync(this);
+                if (currentPassword is null) return;
+                if (!_securityService.TryUnlock(currentPassword))
+                {
+                    await MessageWindow.ShowAsync("ClippyPlus", LocalizationService.T("Security.InvalidPassword"), this);
+                    return;
+                }
+                string? newPassword = null;
+                if (!_securityService.IsPasswordEnabled)
+                {
+                    newPassword = await PasswordWindow.ShowCreateAsync(this);
+                    if (newPassword is null) return;
+                }
+                if (!_securityService.SetPasswordProtection(currentPassword, newPassword))
+                {
+                    await MessageWindow.ShowAsync("ClippyPlus", LocalizationService.T("Security.InvalidPassword"), this);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await MessageWindow.ShowAsync("ClippyPlus", ex.Message, this);
+        }
+        finally
+        {
+            _passwordProtectionButton.Content = LocalizationService.T(_securityService.IsPasswordConfigured && _securityService.IsPasswordEnabled ? "Security.DisablePassword" : "Security.EnablePassword");
+            _passwordProtectionButton.IsEnabled = true;
+        }
     }
 
     public event EventHandler<AppSettings>? Saved;

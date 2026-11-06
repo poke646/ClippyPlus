@@ -349,6 +349,63 @@ public sealed class ClipboardHistoryTests : IDisposable
         Assert.False(nextSessionSecurity.IsUnlocked);
     }
 
+    [Fact]
+    public void PasswordProtection_PreservesHistoryAcrossDisableAndEnable()
+    {
+        var path = CreateDatabasePath();
+        var security = new ClipboardSecurityService(path);
+        security.SetPassword("original password");
+        var store = new ClipboardHistoryStore(path, security);
+        store.Upsert(ClipboardHistoryEntryFactory.FromText("retained secret")!);
+        var protectedImage = security.ProtectBytes([1, 2, 3, 4]);
+        var hash = security.ComputeProtectedContentHash("stable hash");
+
+        Assert.False(security.SetPasswordProtection("wrong password", null));
+        Assert.True(security.IsPasswordEnabled);
+        Assert.True(security.SetPasswordProtection("original password", null));
+        var automaticSession = new ClipboardSecurityService(path);
+        Assert.False(automaticSession.IsPasswordEnabled);
+        Assert.True(automaticSession.IsUnlocked);
+        Assert.Single(new ClipboardHistoryStore(path, automaticSession).GetRecent(100));
+        Assert.False(automaticSession.SetPasswordProtection("wrong password", "replacement password"));
+        Assert.Throws<ArgumentException>(() => automaticSession.SetPasswordProtection("original password", "short"));
+        Assert.False(new ClipboardSecurityService(path).IsPasswordEnabled);
+        Assert.True(automaticSession.SetPasswordProtection("original password", "replacement password"));
+
+        var lockedSession = new ClipboardSecurityService(path);
+        Assert.True(lockedSession.IsPasswordEnabled);
+        Assert.False(lockedSession.IsUnlocked);
+        Assert.False(lockedSession.TryUnlock("original password"));
+        Assert.True(lockedSession.TryUnlock("replacement password"));
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, lockedSession.UnprotectBytes(protectedImage));
+        Assert.Equal(hash, lockedSession.ComputeProtectedContentHash("stable hash"));
+        var reopenedStore = new ClipboardHistoryStore(path, lockedSession);
+        Assert.Single(reopenedStore.GetRecent(100));
+        reopenedStore.Upsert(ClipboardHistoryEntryFactory.FromText("retained secret")!);
+        Assert.Single(reopenedStore.GetRecent(100));
+
+        // Repeat with wrapped keys, rather than the original password-derived keys.
+        Assert.True(lockedSession.SetPasswordProtection("replacement password", null));
+        var secondAutomaticSession = new ClipboardSecurityService(path);
+        Assert.True(secondAutomaticSession.IsUnlocked);
+        Assert.True(secondAutomaticSession.SetPasswordProtection("replacement password", "third password"));
+        var finalSession = new ClipboardSecurityService(path);
+        Assert.False(finalSession.TryUnlock("replacement password"));
+        Assert.True(finalSession.TryUnlock("third password"));
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, finalSession.UnprotectBytes(protectedImage));
+        Assert.Single(new ClipboardHistoryStore(path, finalSession).GetRecent(100));
+    }
+
+    [Fact]
+    public void SetPassword_RejectsReplacingExistingKeys()
+    {
+        var security = new ClipboardSecurityService(CreateDatabasePath());
+        security.SetPassword("original password");
+        var value = security.ProtectString("preserved");
+        Assert.Throws<InvalidOperationException>(() => security.SetPassword("replacement password"));
+        Assert.Equal("preserved", security.UnprotectString(value));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_tempDirectory))
