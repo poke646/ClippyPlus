@@ -6,11 +6,17 @@ public interface IClipboardHistoryStore
 {
     IReadOnlyList<ClipboardHistoryItem> GetRecent(int limit);
 
+    IReadOnlyList<ClipboardHistoryItem> GetRecent(int limit, bool includeImageBytes);
+
     IReadOnlyList<ClipboardHistoryItem> SearchText(string query, int limit);
 
     IReadOnlyList<ClipboardSection> GetSections();
 
     IReadOnlyList<ClipboardHistoryItem> GetSectionItems(long sectionId, int limit);
+
+    IReadOnlyList<ClipboardHistoryItem> GetSectionItems(long sectionId, int limit, bool includeImageBytes);
+
+    byte[]? GetImageBytes(long itemId, long? sectionId, string contentHash);
 
     IReadOnlyList<ClipboardHistoryItem> SearchSectionText(long sectionId, string query, int limit);
 

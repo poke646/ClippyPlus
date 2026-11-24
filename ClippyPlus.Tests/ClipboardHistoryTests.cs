@@ -57,6 +57,30 @@ public sealed class ClipboardHistoryTests : IDisposable
         Assert.Equal(imageBytes, items[0].ImageBytes);
     }
 
+    [Fact]
+    public void LightweightReads_DeferImageBytesAndRespectSectionScope()
+    {
+        var (store, _) = CreateStore();
+        var section = Assert.Single(store.GetSections());
+        byte[] imageBytes = [1, 2, 3, 4];
+        var text = new string('a', 250) + "searchable text";
+        store.Upsert(ClipboardHistoryEntryFactory.FromImageBytes(imageBytes)!);
+        store.Upsert(ClipboardHistoryEntryFactory.FromText(text)!);
+
+        var recent = store.GetRecent(100, includeImageBytes: false);
+        var image = recent.Single(item => item.IsImage);
+        Assert.Equal(text, recent.Single(item => item.IsText).TextContent);
+        Assert.Null(image.ImageBytes);
+        Assert.Equal(imageBytes, store.GetImageBytes(image.Id, null, image.ContentHash));
+        Assert.Null(store.GetImageBytes(image.Id, null, "different hash"));
+
+        Assert.Equal(PinClipboardItemResult.Success, store.Pin(image.Id, section.Id));
+        var pinnedImage = Assert.Single(store.GetSectionItems(section.Id, 100, includeImageBytes: false));
+        Assert.Null(pinnedImage.ImageBytes);
+        Assert.Equal(imageBytes, store.GetImageBytes(pinnedImage.Id, section.Id, pinnedImage.ContentHash));
+        Assert.Null(store.GetImageBytes(pinnedImage.Id, section.Id + 1, pinnedImage.ContentHash));
+        Assert.Null(store.GetImageBytes(pinnedImage.Id, null, pinnedImage.ContentHash));
+    }
 
     [Fact]
     public void Upsert_DuplicateTextMovesExistingItemToTop()

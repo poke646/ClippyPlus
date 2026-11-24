@@ -1,4 +1,6 @@
 using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using ClippyPlus.App.Services;
 
@@ -70,7 +72,24 @@ public sealed class MessageWindow : Window
 
     public static Task ShowAsync(string title, string message, Window? owner)
     {
+        return ShowAsync(title, message, owner, null);
+    }
+
+    internal static Task ShowAsync(string title, string message, Window? owner, Action? onEscape)
+    {
         var window = new MessageWindow(title, message, showCancel: false);
+        if (onEscape is not null)
+        {
+            window.AddHandler(KeyDownEvent, (_, e) =>
+            {
+                if (e.Key == Key.Escape)
+                {
+                    e.Handled = true;
+                    onEscape();
+                }
+            }, RoutingStrategies.Tunnel, handledEventsToo: true);
+        }
+
         if (owner is not null)
         {
             return window.ShowDialog(owner);

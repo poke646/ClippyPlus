@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
+using Avalonia.Media;
 using ClippyPlus.App.Services;
 
 namespace ClippyPlus.App;
@@ -22,8 +23,8 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             _clipboardHost = CreateClipboardHost();
+            // Avalonia dialogs need a shown owner, even when it has no visible surface.
             _clipboardHost.Show();
-            _clipboardHost.Hide();
             desktop.MainWindow = _clipboardHost;
             desktop.ShutdownRequested += (_, _) => _trayAppContext?.Dispose();
 
@@ -74,8 +75,12 @@ public partial class App : Application
         {
             Width = 1,
             Height = 1,
+            ShowActivated = false,
             ShowInTaskbar = false,
             WindowDecorations = WindowDecorations.None,
+            TransparencyLevelHint = [WindowTransparencyLevel.Transparent],
+            TransparencyBackgroundFallback = Brushes.Transparent,
+            Background = Brushes.Transparent,
             Opacity = 0,
             CanResize = false,
             Title = "ClippyPlus",

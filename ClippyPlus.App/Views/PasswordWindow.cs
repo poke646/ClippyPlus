@@ -1,5 +1,6 @@
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using ClippyPlus.App.Services;
@@ -13,10 +14,12 @@ public sealed class PasswordWindow : Window
     private readonly TextBox? _confirmPasswordTextBox;
     private readonly TextBlock _errorTextBlock;
     private readonly bool _isCreatingPassword;
+    private readonly Func<string, bool>? _tryUnlock;
 
-    private PasswordWindow(bool isCreatingPassword, bool verifyCurrent = false)
+    private PasswordWindow(bool isCreatingPassword, bool verifyCurrent = false, Func<string, bool>? tryUnlock = null)
     {
         _isCreatingPassword = isCreatingPassword;
+        _tryUnlock = tryUnlock;
         Title = LocalizationService.T(isCreatingPassword ? "Security.CreateTitle" : "Security.UnlockTitle");
         Width = 360;
         SizeToContent = SizeToContent.Height;
@@ -58,7 +61,7 @@ public sealed class PasswordWindow : Window
             Content = LocalizationService.T("Settings.Cancel"),
             MinWidth = 90,
         };
-        cancelButton.Click += (_, _) => Close(null);
+        cancelButton.Click += (_, _) => Close();
 
         var inputPanel = new StackPanel
         {
@@ -98,19 +101,19 @@ public sealed class PasswordWindow : Window
             },
         };
 
-        KeyDown += (_, e) =>
+        AddHandler(KeyDownEvent, (_, e) =>
         {
-            if (e.Key is Key.Enter or Key.Return)
+            if (e.Key == Key.Escape)
             {
+                e.Handled = true;
+                Close();
+            }
+            else if (e.Key is Key.Enter or Key.Return && e.Source is not Button)
+            {
+                e.Handled = true;
                 Submit();
-                e.Handled = true;
             }
-            else if (e.Key == Key.Escape)
-            {
-                Close(null);
-                e.Handled = true;
-            }
-        };
+        }, RoutingStrategies.Tunnel, handledEventsToo: true);
         Opened += (_, _) =>
         {
             _activeWindow = this;
@@ -143,9 +146,9 @@ public sealed class PasswordWindow : Window
         return new PasswordWindow(isCreatingPassword: true).ShowDialog<string?>(owner);
     }
 
-    public static Task<string?> ShowUnlockAsync(Window owner)
+    public static Task<bool> ShowUnlockAsync(Window owner, Func<string, bool> tryUnlock)
     {
-        return new PasswordWindow(isCreatingPassword: false).ShowDialog<string?>(owner);
+        return new PasswordWindow(isCreatingPassword: false, tryUnlock: tryUnlock).ShowDialog<bool>(owner);
     }
 
     private void Submit()
@@ -171,7 +174,37 @@ public sealed class PasswordWindow : Window
             return;
         }
 
-        Close(password);
+        if (_tryUnlock is { } tryUnlock)
+        {
+            SubmitUnlock(password, tryUnlock);
+        }
+        else
+        {
+            Close(password);
+        }
+    }
+
+    private void SubmitUnlock(string password, Func<string, bool> tryUnlock)
+    {
+        _passwordTextBox.Text = string.Empty;
+        string? error;
+        try
+        {
+            error = tryUnlock(password) ? null : LocalizationService.T("Security.InvalidPassword");
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+
+        if (error is null)
+        {
+            Close(true);
+            return;
+        }
+
+        ShowError(error);
+        _passwordTextBox.Focus();
     }
 
     private void ShowError(string message)

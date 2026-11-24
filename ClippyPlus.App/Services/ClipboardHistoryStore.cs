@@ -39,10 +39,16 @@ public sealed class ClipboardHistoryStore : IClipboardHistoryStore
 
     public IReadOnlyList<ClipboardHistoryItem> GetRecent(int limit)
     {
+        return GetRecent(limit, includeImageBytes: true);
+    }
+
+    public IReadOnlyList<ClipboardHistoryItem> GetRecent(int limit, bool includeImageBytes)
+    {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT Id, Kind, CreatedAt, UpdatedAt, Preview, ContentHash, TextContent, ImageBytes
+        var imageColumn = includeImageBytes ? "ImageBytes" : "NULL";
+        command.CommandText = $"""
+            SELECT Id, Kind, CreatedAt, UpdatedAt, Preview, ContentHash, TextContent, {imageColumn}
             FROM ClipboardHistoryItems
             ORDER BY UpdatedAt DESC
             LIMIT $limit;
@@ -83,10 +89,16 @@ public sealed class ClipboardHistoryStore : IClipboardHistoryStore
 
     public IReadOnlyList<ClipboardHistoryItem> GetSectionItems(long sectionId, int limit)
     {
+        return GetSectionItems(sectionId, limit, includeImageBytes: true);
+    }
+
+    public IReadOnlyList<ClipboardHistoryItem> GetSectionItems(long sectionId, int limit, bool includeImageBytes)
+    {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT Id, Kind, CreatedAt, UpdatedAt, Preview, ContentHash, TextContent, ImageBytes
+        var imageColumn = includeImageBytes ? "ImageBytes" : "NULL";
+        command.CommandText = $"""
+            SELECT Id, Kind, CreatedAt, UpdatedAt, Preview, ContentHash, TextContent, {imageColumn}
             FROM PinnedClipboardItems
             WHERE SectionId = $sectionId
             ORDER BY UpdatedAt DESC
@@ -95,6 +107,33 @@ public sealed class ClipboardHistoryStore : IClipboardHistoryStore
         command.Parameters.AddWithValue("$sectionId", sectionId);
         command.Parameters.AddWithValue("$limit", limit);
         return ReadItems(command);
+    }
+
+    public byte[]? GetImageBytes(long itemId, long? sectionId, string contentHash)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        if (sectionId is { } id)
+        {
+            command.CommandText = """
+                SELECT ImageBytes FROM PinnedClipboardItems
+                WHERE Id = $itemId AND SectionId = $sectionId
+                  AND ContentHash = $contentHash AND Kind = $kind;
+                """;
+            command.Parameters.AddWithValue("$sectionId", id);
+        }
+        else
+        {
+            command.CommandText = """
+                SELECT ImageBytes FROM ClipboardHistoryItems
+                WHERE Id = $itemId AND ContentHash = $contentHash AND Kind = $kind;
+                """;
+        }
+
+        command.Parameters.AddWithValue("$itemId", itemId);
+        command.Parameters.AddWithValue("$contentHash", contentHash);
+        command.Parameters.AddWithValue("$kind", ClipboardHistoryKind.Image.ToString());
+        return command.ExecuteScalar() is byte[] bytes ? _securityService.UnprotectBytes(bytes) : null;
     }
 
     public IReadOnlyList<ClipboardHistoryItem> SearchSectionText(long sectionId, string query, int limit)
@@ -372,7 +411,7 @@ public sealed class ClipboardHistoryStore : IClipboardHistoryStore
                 Preview = _securityService.UnprotectString(reader.GetString(4)),
                 ContentHash = reader.GetString(5),
                 TextContent = reader.IsDBNull(6) ? null : _securityService.UnprotectString(reader.GetString(6)),
-                ImageBytes = reader.IsDBNull(7) ? null : _securityService.UnprotectBytes((byte[])reader["ImageBytes"]),
+                ImageBytes = reader.IsDBNull(7) ? null : _securityService.UnprotectBytes(reader.GetFieldValue<byte[]>(7)),
             });
         }
 

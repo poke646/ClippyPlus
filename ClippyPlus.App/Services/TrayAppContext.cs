@@ -113,7 +113,11 @@ public sealed class TrayAppContext : IDisposable
         _hotkeyService.CaptureHotkeyPressed += (_, _) => _ = BeginCaptureAsync(openEditorAfterCapture: false);
         _hotkeyService.EditCaptureHotkeyPressed += (_, _) => _ = BeginCaptureAsync(openEditorAfterCapture: true);
         _hotkeyService.ClipboardHistoryHotkeyPressed += (_, _) => _ = OpenClipboardHistoryWindowAsync();
-        _hotkeyService.EscapePressed += (_, _) => CancelActiveCapture();
+        _hotkeyService.EscapePressed += (_, _) =>
+        {
+            CancelActiveCapture();
+            _clipboardHistoryWindow?.CloseOnEscape();
+        };
     }
 
     public async Task StartAsync()
@@ -251,26 +255,29 @@ public sealed class TrayAppContext : IDisposable
             return;
         }
 
-        if (_clipboardHistoryWindow is not null)
+        if (_clipboardHistoryWindow is not { } window)
         {
-            _clipboardHistoryWindow.SetHideSharingEnabled(_settings.HideSharingEnabled);
-            _clipboardHistoryWindow.ResetForOpen();
-            _clipboardHistoryWindow.Show();
-            _clipboardHistoryWindow.CenterOnScreen();
-            _clipboardHistoryWindow.Activate();
-            return;
+            window = new ClipboardHistoryWindow(
+                _clipboardHistoryStore,
+                _clipboardService,
+                _clipboardHistoryListener,
+                _settings.HideSharingEnabled,
+                _windowPrivacyService);
+            _clipboardHistoryWindow = window;
+            window.Closed += (_, _) => _clipboardHistoryWindow = null;
         }
 
-        _clipboardHistoryWindow = new ClipboardHistoryWindow(
-            _clipboardHistoryStore,
-            _clipboardService,
-            _clipboardHistoryListener,
-            _settings.HideSharingEnabled,
-            _windowPrivacyService);
-        _clipboardHistoryWindow.Closed += (_, _) => _clipboardHistoryWindow = null;
-        _clipboardHistoryWindow.Show(GetOwner());
-        _clipboardHistoryWindow.CenterOnScreen();
-        _clipboardHistoryWindow.Activate();
+        window.SetHideSharingEnabled(_settings.HideSharingEnabled);
+        if (window.IsVisible)
+        {
+            window.ResetForOpen();
+        }
+        else
+        {
+            window.Show();
+        }
+
+        window.Activate();
     }
 
     private Task<bool> EnsureClipboardUnlockedAsync()
@@ -311,19 +318,7 @@ public sealed class TrayAppContext : IDisposable
                 }
             }
 
-            var password = await PasswordWindow.ShowUnlockAsync(owner);
-            if (password is null)
-            {
-                return false;
-            }
-
-            if (_clipboardSecurityService.TryUnlock(password))
-            {
-                return true;
-            }
-
-            await MessageWindow.ShowAsync("ClippyPlus", LocalizationService.T("Security.InvalidPassword"), owner);
-            return false;
+            return await PasswordWindow.ShowUnlockAsync(owner, _clipboardSecurityService.TryUnlock);
         }
         finally
         {
